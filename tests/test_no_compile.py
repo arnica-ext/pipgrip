@@ -163,19 +163,23 @@ def test_skip_invalid_input_with_no_compile_tree_output():
     assert "dependencies" in requests_pkg and len(requests_pkg["dependencies"]) > 0
 
     assert gevent_pkg["version"] == "20.9.0"
-    assert "dependencies" not in gevent_pkg or len(gevent_pkg["dependencies"]) == 0
+    # With PyPI fallback, gevent should now have dependencies
+    assert "dependencies" in gevent_pkg and len(gevent_pkg["dependencies"]) > 0
 
 
 @pytest.mark.skipif(
     PIP_VERSION < [22, 2],
     reason="get_package_report not available on old pip, plus weird output behavior",
 )
-def test_no_compile_fails_without_skip_flag():
-    """Test that --no-compile fails without --skip-invalid-input for an invalid package."""
+def test_no_compile_succeeds_with_pypi_fallback():
+    """Test that --no-compile succeeds with PyPI fallback even without --skip-invalid-input."""
     runner = CliRunner()
     result = runner.invoke(main, ["--no-compile", "gevent==20.9.0"])
-    assert result.exit_code != 0
-    assert "Failed to get report for" in result.output
+    # Should succeed now due to PyPI fallback
+    assert result.exit_code == 0
+    assert "gevent==20.9.0" in result.output
+    # Should also include dependencies from PyPI
+    assert "greenlet" in result.output
 
 
 @pytest.mark.skipif(
@@ -237,4 +241,44 @@ def test_requirements_file_skip_invalid_no_compile_tree_json(tmp_path):
     assert "dependencies" in requests_pkg and len(requests_pkg["dependencies"]) > 0
 
     assert gevent_pkg is not None and gevent_pkg["version"] == "20.9.0"
-    assert "dependencies" not in gevent_pkg or len(gevent_pkg["dependencies"]) == 0
+    # With PyPI fallback, gevent should now have dependencies
+    assert "dependencies" in gevent_pkg and len(gevent_pkg["dependencies"]) > 0
+    # Check for expected gevent dependencies
+    dep_names = [dep["name"] for dep in gevent_pkg["dependencies"]]
+    assert "greenlet" in dep_names
+
+
+@pytest.mark.skipif(
+    PIP_VERSION < [22, 2],
+    reason="get_package_report not available on old pip, plus weird output behavior",
+)
+def test_pypi_fallback_for_no_compile_packages():
+    """Test that PyPI fallback provides dependency information for packages that can't be compiled."""
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "--skip-invalid-input",
+            "--no-compile",
+            "gevent==20.9.0",
+            "--tree",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+
+    gevent_pkg = next((p for p in data if p["name"] == "gevent"), None)
+    assert gevent_pkg is not None
+    assert gevent_pkg["version"] == "20.9.0"
+
+    # Should have dependencies from PyPI fallback
+    assert "dependencies" in gevent_pkg
+    dependencies = gevent_pkg["dependencies"]
+    assert len(dependencies) > 0
+
+    # Check for expected gevent dependencies
+    dep_names = [dep["name"] for dep in dependencies]
+    assert "greenlet" in dep_names
+    assert any("zope" in name for name in dep_names)  # zope-event or zope-interface

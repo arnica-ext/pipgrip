@@ -39,6 +39,8 @@ import shutil
 import subprocess
 import sys
 from tempfile import NamedTemporaryFile, mkdtemp
+from urllib.error import URLError
+from urllib.request import urlopen
 
 import pkg_resources
 from click import echo as _echo
@@ -542,6 +544,54 @@ def _get_wheel_requirements(metadata, extras_requested):
     return result
 
 
+def _get_pypi_metadata(package_name, version=None, index_url=None):
+    """Get package metadata from PyPI JSON API as fallback."""
+    # Use PyPI by default, but respect custom index_url if provided
+    if index_url and "pypi.org" not in index_url:
+        # For non-PyPI indexes, we can't use the JSON API fallback
+        return None
+
+    base_url = "https://pypi.org/pypi"
+    if version:
+        url = f"{base_url}/{package_name}/{version}/json"
+    else:
+        url = f"{base_url}/{package_name}/json"
+
+    try:
+        logger.debug(f"Fetching PyPI metadata from {url}")
+        with urlopen(url) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        info = data.get("info", {})
+        releases = data.get("releases", {})
+
+        # Get the version to use
+        if version:
+            target_version = version
+        else:
+            target_version = info.get("version")
+
+        if not target_version:
+            return None
+
+        # Get dependencies from requires_dist
+        requires_dist = info.get("requires_dist") or []
+
+        # Get available versions
+        available_versions = list(releases.keys())
+
+        return {
+            "name": info.get("name", package_name),
+            "version": target_version,
+            "available": available_versions,
+            "requires_dist": requires_dist,
+        }
+
+    except (URLError, json.JSONDecodeError, KeyError) as e:
+        logger.debug(f"Failed to fetch PyPI metadata for {package_name}: {e}")
+        return None
+
+
 def is_unneeded_dep(package):
     """Evaluate a single package in the context of the current environment."""
     return not _get_wheel_requirements({"requires_dist": [package]}, [])
@@ -628,6 +678,38 @@ def discover_dependencies_and_versions(
             "requires": wheel_requirements,
         }
     except RuntimeError as e:
+        # Try PyPI fallback if the error is due to compilation issues and no_compile is enabled
+        if no_compile and (
+            "Failed to get report for" in str(e)
+            or "Failed to download/build wheel for" in str(e)
+        ):
+            logger.info(
+                "Trying PyPI fallback for '%s' due to compilation issues", package
+            )
+
+            # Extract version from requirement if it's pinned
+            version = None
+            if req.specs and len(req.specs) == 1 and req.specs[0][0] == "==":
+                version = req.specs[0][1]
+
+            pypi_data = _get_pypi_metadata(req.name, version, index_url)
+            if pypi_data:
+                logger.info("Successfully fetched metadata from PyPI for '%s'", package)
+
+                # Convert requires_dist to wheel requirements format
+                wheel_requirements = _get_wheel_requirements(
+                    {"requires_dist": pypi_data["requires_dist"]}, extras_requested
+                )
+
+                return {
+                    "name": pypi_data["name"],
+                    "version": pypi_data["version"],
+                    "available": pypi_data["available"],
+                    "requires": wheel_requirements,
+                }
+            else:
+                logger.warning("PyPI fallback also failed for '%s'", package)
+
         if skip_invalid_input:
             logger.warning("Skipping package discovery for '%s': %s", package, str(e))
             return None
