@@ -127,9 +127,12 @@ class PackageSource(BasePackageSource):
         index_url,
         extra_index_url,
         pre,
+        no_compile=False,
+        skip_invalid_input=False,
     ):  # type: () -> None
         self._root_version = Version.parse("0.0.0")
         self._root_dependencies = []
+        self._failed_root_dependencies = []
         self._packages = {}
         self._packages_metadata = {}
         self.cache_dir = cache_dir
@@ -137,6 +140,8 @@ class PackageSource(BasePackageSource):
         self.index_url = index_url
         self.extra_index_url = extra_index_url
         self.pre = pre
+        self.no_compile = no_compile
+        self.skip_invalid_input = skip_invalid_input
 
         super(PackageSource, self).__init__()
 
@@ -184,7 +189,17 @@ class PackageSource(BasePackageSource):
             cache_dir=self.cache_dir,
             no_cache_dir=self.no_cache_dir,
             pre=self.pre,
+            no_compile=self.no_compile,
+            skip_invalid_input=self.skip_invalid_input,
         )
+
+        # If skip_invalid_input is True and discovery failed, to_create will be None
+        if to_create is None:
+            # Add empty package info so it doesn't get retried
+            if req.key not in self._packages:
+                self._packages[req.key] = {req.extras: {}}
+            return
+
         for version in to_create["available"]:
             self.add(req.key, req.extras, version)
         self.add(
@@ -207,8 +222,37 @@ class PackageSource(BasePackageSource):
         if is_unneeded_dep(package):
             return
         req = parse_req(package)
-        constraint = req.url or ",".join(["".join(tup) for tup in req.specs])
-        self._root_dependencies.append(Dependency(req.key, constraint, req.__str__()))
+
+        # Try to discover the package first to see if it's valid
+        if self.skip_invalid_input:
+            result = discover_dependencies_and_versions(
+                package=package,
+                index_url=self.index_url,
+                extra_index_url=self.extra_index_url,
+                cache_dir=self.cache_dir,
+                no_cache_dir=self.no_cache_dir,
+                pre=self.pre,
+                no_compile=self.no_compile,
+                skip_invalid_input=self.skip_invalid_input,
+            )
+            if result is None:
+                # Package discovery failed - don't add to root dependencies for solver
+                # but track it separately for output
+                self._failed_root_dependencies.append(req)
+                logger.warning(
+                    "Root dependency '%s' failed discovery, will be included in output without dependencies",
+                    package,
+                )
+                return
+
+        # Only add to root dependencies if discovery succeeded or skip_invalid_input is False
+        self._root_dependencies.append(
+            Dependency(
+                req.key,
+                req.url or ",".join(["".join(tup) for tup in req.specs]),
+                req.__str__(),
+            )
+        )
 
     def _versions_for(
         self, package, constraint=None

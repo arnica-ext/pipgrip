@@ -391,6 +391,11 @@ def render_lock(packages, include_dot=True, sort=False):
     is_flag=True,
     help="Skip invalid requirements (e.g. internal repositories, typos) and continue processing other dependencies.",
 )
+@click.option(
+    "--no-compile",
+    is_flag=True,
+    help="Avoid building/compiling packages from source when getting dependencies. Uses only pre-compiled wheels.",
+)
 @click.version_option(version=__version__, prog_name="pipgrip")
 def main(
     dependencies,
@@ -416,6 +421,7 @@ def main(
     pre,
     verbose,
     skip_invalid_input,
+    no_compile,
 ):
     if verbose == 0:
         logger.setLevel(logging.ERROR)
@@ -484,6 +490,8 @@ def main(
             index_url=index_url,
             extra_index_url=extra_index_url,
             pre=pre,
+            no_compile=no_compile,
+            skip_invalid_input=skip_invalid_input,
         )
         for root_dependency in dependencies:
             try:
@@ -505,8 +513,15 @@ def main(
             if REPORT_FAILURE_STR not in str(e) and BUILD_FAILURE_STR not in str(e):
                 # only continue handling expected RuntimeErrors
                 raise
-            solution = solver.solution
-            exc = e
+
+            # If skip_invalid_input is enabled, log the error and continue with partial solution
+            if skip_invalid_input:
+                logger.warning("Skipping failed package: %s", str(e))
+                solution = solver.solution
+                exc = None  # Don't treat this as an error since we're skipping
+            else:
+                solution = solver.solution
+                exc = e
 
         # build tree of the (partial) solution using package metadata from source
         decision_packages = OrderedDict()
@@ -520,16 +535,47 @@ def main(
         tree_root, packages_tree_dict, packages_flat = build_tree(
             source, decision_packages
         )
+
+        # If skip_invalid_input is enabled, add failed root dependencies to tree and packages_flat
+        if skip_invalid_input and source._failed_root_dependencies:
+            for req in source._failed_root_dependencies:
+                if req.name not in packages_flat:
+                    # Extract version from the constraint if it's an exact version
+                    version = "undecided"
+                    if req.specs and req.specs[0][0] == "==":
+                        version = req.specs[0][1]
+                        packages_flat[req.name] = version
+
+                    # Add to tree as well for tree output
+                    Node(
+                        req.name,
+                        version=version,
+                        parent=tree_root,
+                        pip_string=str(req),
+                        extras_name=req.extras_name,
+                        extras=req.extras,
+                    )
+
         rendered_tree = render_tree(tree_root, max_depth, tree_ascii)
 
         if exc is None:
             if "(undecided)" in rendered_tree:
-                logger.error(
-                    "Unexpected partial solution encountered:\n{}".format(rendered_tree)
-                )
-                raise RuntimeError(
-                    "Unexpected partial solution encountered, not all packages have decisions"
-                )
+                if skip_invalid_input:
+                    # When skipping invalid input, undecided packages are expected
+                    logger.warning(
+                        "Partial solution with undecided packages (some packages could not be resolved):\n{}".format(
+                            rendered_tree
+                        )
+                    )
+                else:
+                    logger.error(
+                        "Unexpected partial solution encountered:\n{}".format(
+                            rendered_tree
+                        )
+                    )
+                    raise RuntimeError(
+                        "Unexpected partial solution encountered, not all packages have decisions"
+                    )
         else:
             # a RuntimeError occurred
             # log a partial tree (failed download/build) if the RuntimeError ends with the culptit pip_string

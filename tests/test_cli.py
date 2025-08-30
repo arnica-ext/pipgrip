@@ -652,3 +652,38 @@ def test_flatten():
         "wrapt": "1.11.2",
         "yarl": "1.4.2",
     }
+
+
+def test_no_compile_flag_basic_functionality(monkeypatch):
+    """Test that --no-compile flag is accepted and doesn't cause errors."""
+    # Test that the CLI accepts the --no-compile flag without errors
+    result = invoke_patched(main, ["--no-compile", "requests==2.22.0"], monkeypatch)
+
+    assert result.exit_code == 0
+    # Should contain dependency information
+    assert "requests==2.22.0" in result.output
+
+
+def test_no_compile_parameter_passed_to_package_source(monkeypatch):
+    """Test that --no-compile parameter is correctly passed to PackageSource."""
+    from pipgrip.package_source import PackageSource
+
+    original_init = PackageSource.__init__
+    captured_kwargs = {}
+
+    def mock_package_source_init(self, *args, **kwargs):
+        captured_kwargs.update(kwargs)
+        # Call original with default no_compile if not provided
+        if "no_compile" not in kwargs:
+            kwargs["no_compile"] = False
+        return original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(PackageSource, "__init__", mock_package_source_init)
+
+    # Test with --no-compile flag
+    result = invoke_patched(main, ["--no-compile", "requests==2.22.0"], monkeypatch)
+
+    # Verify that no_compile=True was passed to PackageSource
+    assert "no_compile" in captured_kwargs
+    assert captured_kwargs["no_compile"] is True
+    assert result.exit_code == 0

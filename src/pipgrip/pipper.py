@@ -172,7 +172,13 @@ def _get_install_args(
 
 
 def _get_wheel_args(
-    index_url, extra_index_url, pre, cache_dir=None, no_cache_dir=False, wheel_dir=None
+    index_url,
+    extra_index_url,
+    pre,
+    cache_dir=None,
+    no_cache_dir=False,
+    wheel_dir=None,
+    no_compile=False,
 ):
     args = [
         sys.executable,
@@ -184,6 +190,8 @@ def _get_wheel_args(
     ]
     if pre:
         args += ["--pre"]
+    if no_compile:
+        args += ["--only-binary", ":all:"]
     if wheel_dir is not None:
         args += [
             "--wheel-dir",
@@ -269,7 +277,10 @@ def _get_available_versions(package, index_url, extra_index_url, pre):
 
     logger.debug("Finding possible versions for {}".format(package))
     args = _get_wheel_args(
-        index_url=index_url, extra_index_url=extra_index_url, pre=pre
+        index_url=index_url,
+        extra_index_url=extra_index_url,
+        pre=pre,
+        no_compile=False,  # no_compile not needed for version discovery
     ) + [package + "==42.42.post424242"]
 
     if [20, 3] <= PIP_VERSION < [21, 1]:
@@ -306,6 +317,7 @@ def _get_package_report(
     pre,
     cache_dir,
     no_cache_dir,
+    no_compile=False,
 ):
     """Get metadata (install report) using pip's --dry-run --report functionality."""
     logger.debug(
@@ -324,6 +336,8 @@ def _get_package_report(
     ]
     if pre:
         args += ["--pre"]
+    if no_compile:
+        args += ["--only-binary", ":all:"]
     if cache_dir is not None:
         args += [
             "--cache-dir",
@@ -377,6 +391,7 @@ def _download_wheel(
     cache_dir,
     no_cache_dir,
     wheel_dir,
+    no_compile=False,
 ):
     """Download/build wheel for package and return its filename."""
     logger.debug(
@@ -391,6 +406,7 @@ def _download_wheel(
         cache_dir=cache_dir,
         no_cache_dir=no_cache_dir,
         wheel_dir=wheel_dir,
+        no_compile=no_compile,
     ) + [package]
     try:
         out = stream_bash_command(args)
@@ -538,6 +554,8 @@ def discover_dependencies_and_versions(
     cache_dir,
     pre,
     no_cache_dir=False,  # added as last arg with default to avoid a breaking change
+    no_compile=False,  # added as last arg with default to avoid a breaking change
+    skip_invalid_input=False,  # added as last arg with default to avoid a breaking change
 ):
     """Get information for a package.
 
@@ -548,12 +566,15 @@ def discover_dependencies_and_versions(
         cache_dir (str): directory for storing wheels
         pre (bool): pip --pre flag
         no_cache_dir (bool): pip --no-cache-dir flag
+        no_compile (bool): avoid building/compiling packages from source
+        skip_invalid_input (bool): skip packages that fail to be discovered
 
     Returns:
         dict: package information:
             'version': the version resolved by pip
             'available': all available versions resolved by pip
             'requires': all requirements as found in corresponding wheel (dist_requires)
+        or None if skip_invalid_input=True and package discovery fails
 
     """
     req = parse_req(package)
@@ -561,44 +582,55 @@ def discover_dependencies_and_versions(
     extras_requested = sorted(req.extras)
 
     logger.info("discovering %s", req)
-    if PIP_VERSION >= [22, 2]:
-        report = _get_package_report(
-            package=req.__str__(),
-            index_url=index_url,
-            extra_index_url=extra_index_url,
-            pre=pre,
-            cache_dir=cache_dir,
-            no_cache_dir=no_cache_dir,
-        )
-        wheel_metadata = report["install"][0]["metadata"]
-    else:  # old python (<=3.6) fallback
-        wheel_dir = mkdtemp()
-        try:
-            wheel_fname = _download_wheel(
+
+    try:
+        if PIP_VERSION >= [22, 2]:
+            report = _get_package_report(
                 package=req.__str__(),
                 index_url=index_url,
                 extra_index_url=extra_index_url,
                 pre=pre,
                 cache_dir=cache_dir,
                 no_cache_dir=no_cache_dir,
-                wheel_dir=wheel_dir,
+                no_compile=no_compile,
             )
-            wheel_metadata = _extract_metadata(wheel_fname)
-        finally:
-            shutil.rmtree(wheel_dir)
-    wheel_requirements = _get_wheel_requirements(wheel_metadata, extras_requested)
-    wheel_version = req.url or wheel_metadata["version"]
-    available_versions = (
-        _get_available_versions(req.name, index_url, extra_index_url, pre)
-        if req.key != "." and req.url is None
-        else [wheel_version]
-    )
-    if wheel_version not in available_versions:
-        available_versions.append(wheel_version)
+            wheel_metadata = report["install"][0]["metadata"]
+        else:  # old python (<=3.6) fallback
+            wheel_dir = mkdtemp()
+            try:
+                wheel_fname = _download_wheel(
+                    package=req.__str__(),
+                    index_url=index_url,
+                    extra_index_url=extra_index_url,
+                    pre=pre,
+                    cache_dir=cache_dir,
+                    no_cache_dir=no_cache_dir,
+                    wheel_dir=wheel_dir,
+                    no_compile=no_compile,
+                )
+                wheel_metadata = _extract_metadata(wheel_fname)
+            finally:
+                shutil.rmtree(wheel_dir)
+        wheel_requirements = _get_wheel_requirements(wheel_metadata, extras_requested)
+        wheel_version = req.url or wheel_metadata["version"]
+        available_versions = (
+            _get_available_versions(req.name, index_url, extra_index_url, pre)
+            if req.key != "." and req.url is None
+            else [wheel_version]
+        )
+        if wheel_version not in available_versions:
+            available_versions.append(wheel_version)
 
-    return {
-        "name": wheel_metadata["name"],
-        "version": wheel_version,
-        "available": available_versions,
-        "requires": wheel_requirements,
-    }
+        return {
+            "name": wheel_metadata["name"],
+            "version": wheel_version,
+            "available": available_versions,
+            "requires": wheel_requirements,
+        }
+    except RuntimeError as e:
+        if skip_invalid_input:
+            logger.warning("Skipping package discovery for '%s': %s", package, str(e))
+            return None
+        else:
+            # Re-raise the error if not skipping invalid input
+            raise
