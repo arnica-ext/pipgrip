@@ -250,7 +250,7 @@ def render_json_tree(tree_root, max_depth, exact):
 def render_json_tree_full(tree_root, max_depth, sort):
     maxlevel = max_depth + 1 if max_depth else None
     exporter = DepTreeDictExporter(maxlevel=maxlevel, attriter=sorted if sort else None)
-    tree_dict_full = exporter.export(tree_root)["dependencies"]
+    tree_dict_full = exporter.export(tree_root).get("dependencies", [])
     return tree_dict_full
 
 
